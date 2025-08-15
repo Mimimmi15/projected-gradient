@@ -2,8 +2,8 @@
 title: "Rapport de laboratoire 6"
 subtitle: "MTH8408"
 author:
-  - name: Votre nom
-    email: votre.adresse@polymtl.ca
+  - name: Amami Yasmine
+    email: yasmine.amami.adresse@polymtl.ca
     affiliation:
       - name: Polytechnique Montréal
 format:
@@ -28,6 +28,14 @@ engine: julia
 VERSION == v"1.11.5" || error("please use julia version 1.11.5")
 using Pkg
 Pkg.activate("labo11_env")
+Pkg.add("OptimizationProblems")
+Pkg.add("Plots")
+Pkg.add("NLPModels")
+Pkg.add("ADNLPModels")
+Pkg.add("SolverCore")
+Pkg.add("NLPModelsIpopt")
+Pkg.add("Ipopt")
+using LinearAlgebra,Random,OptimizationProblems,Plots,NLPModels,ADNLPModels,SolverCore,NLPModelsIpopt
 ```
 
 # Question 1
@@ -36,7 +44,109 @@ Implémenter la condition d'Armijo modifiée et la méthode du gradient projeté
 Votre implémentation doit accepter des contraintes définies par un ensemble "simple" $C$.
 
 ```{julia}
-# votre code ici
+# Structure abstraite pour les ensembles simples
+abstract type AbstractSimpleSet end
+
+projection!(x, C::AbstractSimpleSet) = error("projection into a set of type $(typeof(C)) is not implemented")
+
+# Structure pour les contraintes de bornes
+mutable struct SimpleBounds{V} <: AbstractSimpleSet where V <: AbstractVector
+  ℓ::V  # vector of lower bounds
+  u::V  # vector of upper bounds
+end
+
+function SimpleBounds(model::AbstractNLPModel{T, V}) where {T, V}
+  ℓ = model.meta.lvar
+  u = model.meta.uvar
+  SimpleBounds{V}(ℓ, u)
+end
+
+# Projection sur les contraintes de bornes
+function projection!(x::V, C::SimpleBounds{V}) where V <: AbstractVector
+  ℓ = C.ℓ
+  u = C.u
+  x .= min.(max.(x, ℓ), u)
+  x
+end
+
+function armijo_line_search(nlp_model::AbstractNLPModel{T,V}, constraint_set::AbstractSimpleSet, current_x::V, gradient_f::V; armijo_const::T = 1e-4,reduction_factor::T = 0.5) where {T, V}
+
+  step_length = one(T)
+  current_fval = obj(nlp_model, current_x)
+  trial_point = copy(current_x)
+  
+  while true
+    trial_point .= current_x .- step_length .* gradient_f
+    projection!(trial_point, constraint_set)
+    
+    displacement = trial_point .- current_x
+    sufficient_decrease = armijo_const * dot(displacement, displacement) / step_length
+    
+    if obj(nlp_model, trial_point) ≤ current_fval - sufficient_decrease
+      return step_length, displacement
+    end
+
+    step_length *= reduction_factor
+  end
+end
+
+# Norme du gradient projeté
+function compute_projected_gradient_norm(x_current, grad_f, constraint_set)
+  temp_point = copy(x_current)
+  temp_point .-= grad_f
+  projection!(temp_point, constraint_set)
+  return norm(x_current .- temp_point)
+end
+
+function projected_gradient(nlp_model::AbstractNLPModel{T,V}, constraint_set::AbstractSimpleSet;abs_tol::T = eps(T)^(1/3), rel_tol::T = eps(T)^(1/3), iteration_limit::Int = typemax(Int64)) where {T, V}
+  
+  iteration_count = 0
+  stopping_criterion_met = false
+  
+  
+  initial_point = copy(nlp_model.meta.x0)
+  current_point = copy(initial_point)
+  objective_value = obj(nlp_model, current_point)
+  current_gradient = grad(nlp_model, current_point)
+  
+  projected_grad_norm = compute_projected_gradient_norm(current_point, current_gradient, constraint_set)
+  initial_grad_norm = projected_grad_norm
+  
+  step_size, search_direction = armijo_line_search(nlp_model, constraint_set, current_point, current_gradient)
+  direction_norm = norm(search_direction)
+  
+  convergence_achieved = projected_grad_norm ≤ abs_tol + rel_tol * initial_grad_norm
+  
+  
+  println("iter       f(x)      ||d||     ||∇P||")
+  println("$iteration_count          $objective_value      $direction_norm      $projected_grad_norm")
+  
+  while !convergence_achieved && !stopping_criterion_met
+    
+    current_point .+= search_direction
+    objective_value = obj(nlp_model, current_point)
+    current_gradient = grad(nlp_model, current_point)
+    projected_grad_norm = compute_projected_gradient_norm(current_point, current_gradient, constraint_set)
+    
+    step_size, search_direction = armijo_line_search(nlp_model, constraint_set, current_point, current_gradient)
+    direction_norm = norm(search_direction)
+    
+    convergence_achieved = projected_grad_norm ≤ abs_tol + rel_tol * initial_grad_norm
+    
+    iteration_count += 1
+    
+    # les critères d'arrêt
+    iterations_exceeded = iteration_count > iteration_limit
+    stopping_criterion_met =  iterations_exceeded
+    
+    println("$iteration_count           $objective_value      $direction_norm      $projected_grad_norm")
+  end
+  
+  
+  println("Algorithme terminé après $iteration_count itérations")
+  
+  return current_point
+end
 ```
 
 # Question 2
@@ -44,7 +154,29 @@ Votre implémentation doit accepter des contraintes définies par un ensemble "s
 Tester votre implémentation et comparer la solution finale à celle de IPOPT sur 3 problèmes tirés de `OptimizationProblems`.
 
 ```{julia}
-# votre code ici
+
+test_problems = ["hs35", "hs65", "hs76"]
+results_comparison = Dict()
+
+println("=== Comparaison Gradient Projeté vs IPOPT ===\n")
+
+for (i, problem_name) in enumerate(test_problems)
+    println("Problème $i: $problem_name")
+    
+    nlp_model = getfield(OptimizationProblems.ADNLPProblems, Symbol(problem_name))()
+    
+    bounds_set = SimpleBounds(nlp_model)
+    
+    println("==Résolution par gradient projeté==")
+    pg_results = projected_gradient(nlp_model, bounds_set)
+    results_comparison[problem_name * "_PG"] = pg_results
+    
+    println("==Résolution par IPOPT==")
+    ipopt_results = ipopt(nlp_model, options=Dict("print_level" => 0))
+    results_comparison[problem_name * "_IPOPT"] = ipopt_results
+    
+end
+
 ```
 
 # Questions 3
@@ -52,7 +184,32 @@ Tester votre implémentation et comparer la solution finale à celle de IPOPT su
 Implémenter une structure et la fonction de projection pour une boule euclidienne.
 
 ```{julia}
-# votre code ici
+struct EuclideanBall{V} <: AbstractSimpleSet where V <: AbstractVector
+    radius::Float64        
+    center_point::V        
+end
+
+# un constructeur dans le cas d'une boule centrée à l'origine
+EuclideanBall(radius::Float64, dimension::Int) = EuclideanBall(radius, zeros(dimension))
+
+# l'opérateur de projection sur une boule euclidienne
+function projection!(point::V, ball::EuclideanBall{V}) where V <: AbstractVector
+    
+    displacement = point .- ball.center_point
+    distance_from_center = norm(displacement)
+    
+    # pas de projection nécessaire si notre point est déjà dans la boule
+    if distance_from_center <= ball.radius
+        return point
+    end
+    
+    # projection sur la frontière de la boule
+    scaling_factor = ball.radius / distance_from_center
+    point .= ball.center_point .+ scaling_factor .* displacement
+    
+    return point
+end
+
 ```
 
 # Question 4
@@ -62,6 +219,36 @@ Votre solution pourrait-elle être utilisée pour calculer un pas dans une méth
 Expliquer.
 
 ```{julia}
-# votre code ici
+
+problem_dimension = 10
+Random.seed!(200) 
+
+# on construit une fonction quadratique non convexe
+eigenvalues = [i % 2 == 0 ? 2.0 + rand() : -(1.0 + rand()) for i in 1:problem_dimension]
+hessian_matrix = Diagonal(eigenvalues)
+
+# Vecteur du terme linéaire
+linear_term = randn(problem_dimension)
+
+# Point de départ
+x0 = zeros(problem_dimension)
+
+# fonction objectif quadratique: f(x) = (1/2)x'Hx + b'x
+quadratic_objective(x) = 0.5 * dot(x, hessian_matrix * x) + dot(linear_term, x)
+
+# (pas de bornes explicites)
+lower_bounds = fill(-Inf, problem_dimension)
+upper_bounds = fill(Inf, problem_dimension)
+
+optimization_model = ADNLPModel(quadratic_objective, x0, lower_bounds, upper_bounds)
+
+# on définit la région de confiance 
+trust_region = EuclideanBall(1.0, problem_dimension)
+
+# on applique la méthode du gradient projeté
+solution_stats = projected_gradient(optimization_model, trust_region)
+
+println(solution_stats)
 ```
 
+Commentaires : Cette methode est utilisable car elle nous permet bien de trouver un point stationnaire. Cependant, c'est une methode couteuse a utiliser.
