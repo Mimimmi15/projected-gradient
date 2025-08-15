@@ -227,10 +227,8 @@ Random.seed!(200)
 eigenvalues = [i % 2 == 0 ? 2.0 + rand() : -(1.0 + rand()) for i in 1:problem_dimension]
 hessian_matrix = Diagonal(eigenvalues)
 
-# Vecteur du terme linéaire
 linear_term = randn(problem_dimension)
 
-# Point de départ
 x0 = zeros(problem_dimension)
 
 # fonction objectif quadratique: f(x) = (1/2)x'Hx + b'x
